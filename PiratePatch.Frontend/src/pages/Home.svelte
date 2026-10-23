@@ -46,7 +46,8 @@
     <h2>What ye need</h2>
     <ul>
       <li>
-        A <strong>Linux machine on an x86-64 CPU</strong>. A virtual machine or WSL on Windows does the job.
+        A <strong>Linux machine on an x86-64 CPU</strong>, from 2022 or newer (glibc 2.34+: Ubuntu 22.04, Debian 12,
+        Fedora 35, RHEL 9 and later all qualify; Alpine doesn't). A virtual machine or WSL on Windows does the job.
       </li>
       <li>A terminal, and a tool for lookin' inside programs. Disassemblers and debuggers such as Ghidra, radare2, gdb or objdump all work.</li>
       <li>Patience. A little assembly helps, but ye can learn it along the way.</li>

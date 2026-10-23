@@ -1,0 +1,32 @@
+# Development helpers for machines without Nix (Windows, macOS, any Linux). Production uses the NixOS module.
+#
+#   docker compose up -d postgres          # a database matching appsettings.Development.json
+#   docker compose run --rm challenge      # builds challenge/build/challenge, the program the API personalises
+#
+# The compose file only serves development: the credentials below are throwaway.
+services:
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_USER: piratepatch
+      POSTGRES_PASSWORD: piratepatch
+      POSTGRES_DB: piratepatch
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U piratepatch"]
+      interval: 5s
+      retries: 10
+
+  challenge:
+    profiles: ["tools"]
+    image: gcc:15
+    working_dir: /src
+    volumes:
+      - ./challenge:/src
+    command: make
+
+volumes:
+  pgdata:

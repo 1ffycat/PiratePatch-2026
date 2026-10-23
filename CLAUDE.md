@@ -28,6 +28,8 @@ frontend (`PiratePatch.Frontend`) is a static Svelte 5 site. `nix/` holds the pa
 
 ## Commands
 
+Development does not need Nix: `docker-compose.yml` provides PostgreSQL and a build of the challenge, and `dotnet run` uses the Development profile (see README, "Development").
+
 ```sh
 dotnet test                                   # unit tests
 npm --prefix PiratePatch.Frontend run check   # svelte-check

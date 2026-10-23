@@ -17,10 +17,24 @@ pkgs.testers.runNixOSTest {
           botUsername = "piratepatch_test_bot";
           botTokenFile = "/etc/piratepatch-test-token";
         };
-        nginx = {
-          enableACME = false;
-          forceSSL = false;
-        };
+        publicUrl = "http://ahoy.test";
+      };
+
+      # Plain HTTP, no certificate: the standard nginx options override the module's defaults.
+      services.nginx.virtualHosts."ahoy.test" = {
+        enableACME = false;
+        forceSSL = false;
+      };
+
+      # Another service already owns a database on the same PostgreSQL instance (think Immich).
+      services.postgresql = {
+        ensureDatabases = [ "neighbour" ];
+        ensureUsers = [
+          {
+            name = "neighbour";
+            ensureDBOwnership = true;
+          }
+        ];
       };
 
       environment.etc."piratepatch-test-token".text = "123456789:TEST-ONLY-token-for-the-vm-test-0000000";
@@ -79,6 +93,12 @@ pkgs.testers.runNixOSTest {
             assert header in page.lower(), f"missing {header}"
         assert "server: nginx/" not in page.lower(), "nginx version leaked"
         assert status_of(f"{HOST} {BASE}/challenge") == "200", "SPA fallback broken"
+
+    with subtest("the existing PostgreSQL instance is shared, not replaced"):
+        databases = server.succeed("sudo -u postgres psql -Atc 'SELECT datname FROM pg_database'").split()
+        assert "piratepatch" in databases and "neighbour" in databases, databases
+        owner = server.succeed("sudo -u postgres psql -Atc \"SELECT pg_get_userbyid(datdba) FROM pg_database WHERE datname = 'piratepatch'\"").strip()
+        assert owner == "piratepatch", owner
 
     with subtest("only nginx is reachable from outside"):
         server.fail("ss -ltn | grep -E ':(5000|5001|8080) '")

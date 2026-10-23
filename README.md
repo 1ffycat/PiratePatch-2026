@@ -66,19 +66,44 @@ Add the flake and the module:
 }
 ```
 
-That alone gives you: a local PostgreSQL database (peer authentication over its socket), the API behind a Unix socket, an
-nginx virtual host with ACME and the security headers, and an auto-generated signing key.
+That alone gives you: a database in your PostgreSQL (see below), the API behind a Unix socket, an nginx virtual host with
+the security headers, and an auto-generated signing key.
 
 Before the first start, create the bot with [@BotFather](https://t.me/BotFather) and run `/setdomain` for it with your domain;
 the login widget refuses to work otherwise.
+
+### Your existing PostgreSQL and nginx
+
+The module adds to what you already run; it does not replace it.
+
+- **PostgreSQL.** With `database.createLocally` (the default) it adds a `piratepatch` database and user to
+  `services.postgresql`, the same way other NixOS services do, so an instance already serving Immich or anything else
+  is reused. Nothing existing is touched. The API connects over the socket with peer authentication, so no password exists.
+  For a remote or differently-authenticated server set `createLocally = false` and `database.host` / `passwordFile`.
+- **nginx.** The module adds one virtual host named after `domain` and sets no global nginx options. Its defaults are
+  ordinary `mkDefault`s (`enableACME`, `forceSSL`), so you adjust it with the standard options, for example a wildcard
+  certificate you already have:
+
+  ```nix
+  services.nginx.virtualHosts."ahoy.example.org" = {
+    enableACME = false;
+    useACMEHost = "example.org";
+  };
+  ```
+
+  With the defaults, a Let's Encrypt certificate is requested for `domain`, which needs
+  `security.acme.acceptTerms = true;` and `security.acme.defaults.email = "...";` somewhere in your configuration (that is
+  global ACME policy, so the module leaves it to you), and port 80 reachable. With `nginx.enable = false` you proxy to the
+  socket yourself: add your proxy's user to the service's `group`, and make it overwrite `X-Forwarded-For` with the client address.
 
 ### Options worth knowing
 
 | Option | Purpose |
 | --- | --- |
+| `domain` / `publicUrl` | The host name, and the origin visitors use (`https://<domain>` unless you say otherwise). |
 | `signing.privateKeyFile` | Supply your own Ed25519 seed (`openssl rand -base64 32`) instead of the generated `/var/lib/piratepatch/signing.key`. |
-| `database.createLocally` / `host` / `passwordFile` | Use an existing or remote PostgreSQL instead. |
-| `nginx.enable`, `nginx.enableACME`, `nginx.forceSSL` | Manage the virtual host yourself, or run without TLS for local testing. |
+| `database.createLocally` / `host` / `passwordFile` | Use another PostgreSQL than the local default. |
+| `nginx.enable` | Turn the virtual host off and bring your own proxy. |
 | `nginx.requestsPerSecond` / `burst` / `maxConnections` | Per-client-address limits at the edge. |
 | `sessionHours` | Login lifetime. |
 
@@ -104,9 +129,9 @@ The service is built so that a flood or a bug stays contained:
 - CSRF: state-changing requests must carry the site's own `Origin`; the site is single-origin so there is no CORS.
 - Cookies are `HttpOnly`, `Secure`, `SameSite=Lax` and `__Host-` prefixed.
 
-For a public deployment on a machine that also hosts other things, consider putting Cloudflare (or similar) in front. If
-you do, tell nginx the real client address (`set_real_ip_from` with their ranges and `real_ip_header CF-Connecting-IP`),
-or all visitors will share one rate-limit bucket.
+The module assumes visitors connect to nginx directly. If you later put a CDN or another proxy in front, tell nginx the
+real client address (`set_real_ip_from` with the proxy's ranges and the matching `real_ip_header`), or all visitors will
+share one rate-limit bucket.
 
 ## Verifying a code without the site
 
@@ -130,18 +155,35 @@ The in-browser inspector on the site's *Inspect a seal* page does the same using
 
 ## Development
 
-```sh
-nix develop                                   # .NET 10, Node 24, gcc, PostgreSQL, radare2
+Nix is optional for development. You need the [.NET 10 SDK](https://dotnet.microsoft.com/download), Node 24, a PostgreSQL,
+and a way to build one Linux program; the pieces below work on Windows, macOS and Linux alike. (The API itself runs
+natively on Windows; it was verified there against a PostgreSQL running elsewhere.)
 
-make -C challenge                             # builds challenge/build/challenge (the template)
-createdb piratepatch                          # a local PostgreSQL; see appsettings.Development.json
-dotnet run --project PiratePatch.Api          # http://localhost:5001, dev login enabled
+```sh
+# 1. A database. With Docker (matches appsettings.Development.json) ...
+docker compose up -d postgres
+#    ... or any PostgreSQL you already have: create a database and set Database__Host / __Port / __Name / __User / __Password.
+
+# 2. The challenge program the API personalises (an x86-64 Linux ELF; this is what players receive).
+docker compose run --rm challenge             # anywhere with Docker
+make -C challenge                             # on Linux or WSL with gcc
+#    -> challenge/build/challenge. It is only ever read as bytes, so the API runs fine on Windows or macOS too.
+
+# 3. The API and the frontend.
+dotnet run --project PiratePatch.Api          # http://localhost:5001
+npm --prefix PiratePatch.Frontend ci
 npm --prefix PiratePatch.Frontend run dev     # http://localhost:5173, proxies /api to the API
 ```
 
-In the Development environment `appsettings.Development.json` supplies throwaway placeholders (a fake bot token and an
-all-zero signing key) and enables `POST /api/auth/dev`, which logs in as any handle without Telegram. Neither exists in
-production.
+With Nix, `nix develop` provides .NET, Node, gcc, PostgreSQL and radare2 in one shell.
+
+`dotnet run` uses the `dev` launch profile, which sets the Development environment. There,
+`appsettings.Development.json` supplies throwaway placeholders (a fake bot token and an all-zero signing key) and enables
+`POST /api/auth/dev`, which logs in as any handle without Telegram, so the whole flow works offline. Neither exists in
+production. To try the real login widget you need a bot, an HTTPS domain set in @BotFather, and a tunnel; the dev login is
+usually enough.
+
+To run the downloaded program on a machine without Linux, use WSL or a VM; it needs glibc 2.34 or newer.
 
 ```sh
 dotnet test                                   # unit tests
@@ -168,7 +210,9 @@ packages: `nix run nixpkgs#prefetch-npm-deps PiratePatch.Frontend/package-lock.j
 
 ## Limitations
 
-- The challenge program is x86-64 only, and so is the flake.
+- The challenge program is x86-64 Linux only, and so is the flake. It runs on any distribution with glibc 2.34 or newer
+  (Ubuntu 22.04+, Debian 12+, Fedora 35+, RHEL 9+; checked on Ubuntu 22.04, and confirmed to fail on 20.04's glibc 2.31).
+  It does not run on musl systems such as Alpine.
 - The treasure code is only XOR-obfuscated inside the program (that is the design: the intended solution is patching, not
   extraction), so a player could also pull it out statically. It is still bound to them.
 - Telegram accounts need a public username.

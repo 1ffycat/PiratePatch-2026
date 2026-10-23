@@ -24,7 +24,6 @@ let
   stateDir = "/var/lib/piratepatch";
   generatedKey = "${stateDir}/signing.key";
 
-  scheme = if cfg.nginx.forceSSL then "https" else "http";
   localDatabase = cfg.database.createLocally;
 
   # Nothing the API does needs the network unless it talks to a remote database or sends admin messages.
@@ -68,6 +67,17 @@ in
       type = types.str;
       example = "ahoy.example.org";
       description = "Domain the site is served on. Also the origin that state-changing requests must come from.";
+    };
+
+    publicUrl = mkOption {
+      type = types.strMatching "https?://[^/]+";
+      default = "https://${cfg.domain}";
+      defaultText = lib.literalExpression ''"https://''${config.services.piratepatch.domain}"'';
+      description = ''
+        The origin visitors use, without a trailing slash. State-changing requests must come from exactly this
+        origin, and it is printed on certificates. Change it if TLS is terminated elsewhere or the site is served
+        on a port other than 443. The session cookie only works over HTTPS (plain HTTP is for local testing).
+      '';
     };
 
     sessionHours = mkOption {
@@ -158,19 +168,20 @@ in
       enable = mkOption {
         type = types.bool;
         default = true;
-        description = "Configure an nginx virtual host for the site. Without it, put your own proxy in front of the API's socket.";
-      };
+        description = ''
+          Add a virtual host for `domain` to `services.nginx`. It is an ordinary virtual host with defaults
+          (ACME certificate, HTTPS redirect) you can override like any other:
 
-      enableACME = mkOption {
-        type = types.bool;
-        default = true;
-        description = "Get a Let's Encrypt certificate for the domain.";
-      };
+          ```nix
+          services.nginx.virtualHosts."ahoy.example.org" = {
+            enableACME = false;
+            useACMEHost = "example.org"; # e.g. a wildcard certificate
+          };
+          ```
 
-      forceSSL = mkOption {
-        type = types.bool;
-        default = true;
-        description = "Redirect HTTP to HTTPS and send HSTS. Turn off only for local testing: the session cookie requires HTTPS.";
+          Nothing else of your nginx configuration is touched. Without this option, point your own proxy at
+          the API's Unix socket (`${socket}`, group-accessible to `group`) and serve the frontend package yourself.
+        '';
       };
 
       requestsPerSecond = mkOption {
@@ -263,7 +274,7 @@ in
           ASPNETCORE_ENVIRONMENT = "Production";
           AllowedHosts = cfg.domain;
           Kestrel__Endpoints__Socket__Url = "http://unix:${socket}";
-          Site__PublicUrl = "${scheme}://${cfg.domain}";
+          Site__PublicUrl = cfg.publicUrl;
           Site__SessionHours = toString cfg.sessionHours;
           Site__KeysPath = "${stateDir}/keys";
           Telegram__BotUsername = cfg.telegram.botUsername;
@@ -357,9 +368,6 @@ in
 
       services.nginx = {
         enable = true;
-        recommendedGzipSettings = mkDefault true;
-        recommendedOptimisation = mkDefault true;
-        recommendedTlsSettings = mkDefault true;
 
         appendHttpConfig = ''
           limit_req_zone $binary_remote_addr zone=piratepatch_api:10m rate=${toString cfg.nginx.requestsPerSecond}r/s;
@@ -367,7 +375,9 @@ in
         '';
 
         virtualHosts.${cfg.domain} = {
-          inherit (cfg.nginx) enableACME forceSSL;
+          # Defaults only: override them with the usual services.nginx.virtualHosts options.
+          enableACME = mkDefault true;
+          forceSSL = mkDefault true;
           root = cfg.frontendPackage;
 
           # add_header is not inherited into locations that use it themselves, so none of the locations below do.
@@ -379,7 +389,7 @@ in
             limit_conn_status 429;
             gzip_static on;
 
-            ${lib.optionalString cfg.nginx.forceSSL ''
+            ${lib.optionalString config.services.nginx.virtualHosts.${cfg.domain}.forceSSL ''
               add_header Strict-Transport-Security "max-age=31536000" always;
             ''}
             add_header X-Content-Type-Options "nosniff" always;
