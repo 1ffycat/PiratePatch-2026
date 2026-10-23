@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="PiratePatch.Api.Tests/PiratePatch.Api.Tests.csproj" />
+  <Project Path="PiratePatch.Api/PiratePatch.Api.csproj" />
+</Solution>

@@ -1,0 +1,32 @@
+# .NET
+bin/
+obj/
+*.user
+.vs/
+TestResults/
+
+# Frontend
+node_modules/
+dist/
+*.local
+
+# Challenge program built for local development
+challenge/build/
+
+# Nix
+result
+result-*
+.direnv/
+
+# Editors and OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Local secrets and scratch files; never commit these
+.env
+.env.*
+*.key
+_ignore.*
