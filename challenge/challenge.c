@@ -262,6 +262,7 @@ static int check_the_chronometer(void)
     { // The deadline
         printf("Avast ye! The sands of time have run out! This challenge be closed since the end of 2024!\n");
         printf("No treasure for latecomers, ye scallywag!\n");
+        printf("[2026 edition note]: This is the expected behavior since day one, you're not late for the party! Get patchin'.\n");
         return 0; // Bomb exploded
     }
     printf("Still time on the clock, carry on, matey!\n");
