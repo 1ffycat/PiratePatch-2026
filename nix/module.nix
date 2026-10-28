@@ -27,7 +27,10 @@ let
   localDatabase = cfg.database.createLocally;
 
   # Nothing the API does needs the network unless it talks to a remote database or sends admin messages.
-  needsNetwork = cfg.telegram.adminChatId != null || !(lib.hasPrefix "/" cfg.database.host);
+  notifies = cfg.telegram.adminChatId != null || cfg.telegram.adminChatIdFile != null;
+  needsNetwork = notifies || !(lib.hasPrefix "/" cfg.database.host);
+
+  vhost = config.services.nginx.virtualHosts.${cfg.domain};
 
   secretFileType = types.addCheck types.str (path: !lib.hasPrefix builtins.storeDir path) // {
     description = "path to a file outside the Nix store";
@@ -100,7 +103,7 @@ in
         type = secretFileType;
         example = "/run/secrets/piratepatch-bot-token";
         description = ''
-          File containing the bot's token. It verifies Telegram logins and, if `adminChatId` is set,
+          File containing the bot's token. It verifies Telegram logins and, if an admin chat is set,
           sends notifications. Passed to the service as a systemd credential, so it can be root-only.
         '';
       };
@@ -108,7 +111,20 @@ in
       adminChatId = mkOption {
         type = types.nullOr types.int;
         default = null;
-        description = "Chat to notify about new players and solves. No notifications when null.";
+        description = ''
+          Chat to notify about new players and solves. No notifications when this and `adminChatIdFile` are null.
+          A chat id is not a secret, but it is private enough to keep out of a public configuration: see `adminChatIdFile`.
+        '';
+      };
+
+      adminChatIdFile = mkOption {
+        type = types.nullOr secretFileType;
+        default = null;
+        example = "/run/secrets/piratepatch-admin-chat";
+        description = ''
+          File containing the id of the chat to notify (for example from agenix or sops-nix), as an alternative to
+          `adminChatId`. Passed to the service as a systemd credential, so it can be root-only.
+        '';
       };
     };
 
@@ -170,13 +186,11 @@ in
         default = true;
         description = ''
           Add a virtual host for `domain` to `services.nginx`. It is an ordinary virtual host with defaults
-          (ACME certificate, HTTPS redirect) you can override like any other:
+          (ACME certificate, HTTPS redirect) you can override like any other. The module requests a certificate
+          for `domain` itself unless the virtual host already sets `useACMEHost`, for example for a wildcard certificate:
 
           ```nix
-          services.nginx.virtualHosts."ahoy.example.org" = {
-            enableACME = false;
-            useACMEHost = "example.org"; # e.g. a wildcard certificate
-          };
+          services.nginx.virtualHosts."ahoy.example.org".useACMEHost = "example.org";
           ```
 
           Nothing else of your nginx configuration is touched. Without this option, point your own proxy at
@@ -207,6 +221,10 @@ in
   config = mkIf cfg.enable (mkMerge [
     {
       assertions = [
+        {
+          assertion = cfg.telegram.adminChatId == null || cfg.telegram.adminChatIdFile == null;
+          message = "services.piratepatch.telegram: set only one of adminChatId and adminChatIdFile.";
+        }
         {
           assertion = !localDatabase || cfg.database.name == cfg.database.user;
           message = "services.piratepatch.database.name must equal database.user when createLocally is set (ensureDBOwnership).";
@@ -313,6 +331,9 @@ in
             }"
           ]
           ++ lib.optional (
+            cfg.telegram.adminChatIdFile != null
+          ) "Telegram__AdminChatId:${cfg.telegram.adminChatIdFile}"
+          ++ lib.optional (
             cfg.database.passwordFile != null
           ) "Database__Password:${cfg.database.passwordFile}";
 
@@ -376,7 +397,8 @@ in
 
         virtualHosts.${cfg.domain} = {
           # Defaults only: override them with the usual services.nginx.virtualHosts options.
-          enableACME = mkDefault true;
+          # (enableACME and useACMEHost are mutually exclusive, so a shared certificate turns the default off.)
+          enableACME = mkDefault (vhost.useACMEHost == null);
           forceSSL = mkDefault true;
           root = cfg.frontendPackage;
 
@@ -389,7 +411,7 @@ in
             limit_conn_status 429;
             gzip_static on;
 
-            ${lib.optionalString config.services.nginx.virtualHosts.${cfg.domain}.forceSSL ''
+            ${lib.optionalString vhost.forceSSL ''
               add_header Strict-Transport-Security "max-age=31536000" always;
             ''}
             add_header X-Content-Type-Options "nosniff" always;

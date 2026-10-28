@@ -57,6 +57,7 @@ Add the flake and the module:
               botUsername = "ahoy_ctf_bot";
               botTokenFile = "/run/secrets/piratepatch-bot-token"; # sops-nix, agenix, ...
               adminChatId = 123456789; # optional: new players and solves are sent here
+              # or keep it out of the configuration: adminChatIdFile = "/run/secrets/piratepatch-admin-chat";
             };
           };
         }
@@ -81,17 +82,15 @@ The module adds to what you already run; it does not replace it.
   is reused. Nothing existing is touched. The API connects over the socket with peer authentication, so no password exists.
   For a remote or differently-authenticated server set `createLocally = false` and `database.host` / `passwordFile`.
 - **nginx.** The module adds one virtual host named after `domain` and sets no global nginx options. Its defaults are
-  ordinary `mkDefault`s (`enableACME`, `forceSSL`), so you adjust it with the standard options, for example a wildcard
-  certificate you already have:
+  ordinary `mkDefault`s (`enableACME`, `forceSSL`), so you adjust it with the standard options. If the virtual host
+  already sets `useACMEHost` (say, a wildcard certificate you already have, or an overlay that does so for every host),
+  the module does not enable ACME for it:
 
   ```nix
-  services.nginx.virtualHosts."ahoy.example.org" = {
-    enableACME = false;
-    useACMEHost = "example.org";
-  };
+  services.nginx.virtualHosts."ahoy.example.org".useACMEHost = "example.org";
   ```
 
-  With the defaults, a Let's Encrypt certificate is requested for `domain`, which needs
+  Otherwise, a Let's Encrypt certificate is requested for `domain`, which needs
   `security.acme.acceptTerms = true;` and `security.acme.defaults.email = "...";` somewhere in your configuration (that is
   global ACME policy, so the module leaves it to you), and port 80 reachable. With `nginx.enable = false` you proxy to the
   socket yourself: add your proxy's user to the service's `group`, and make it overwrite `X-Forwarded-For` with the client address.
