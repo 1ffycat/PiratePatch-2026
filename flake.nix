@@ -2,6 +2,7 @@
   description = "Cap'n Radare's Patchin' Challenge: a pirate-themed binary patching CTF";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+  inputs.self.lfs = true;
 
   outputs =
     { self, nixpkgs }:
