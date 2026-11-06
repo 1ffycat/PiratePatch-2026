@@ -62,7 +62,7 @@
     <h2>The fine print</h2>
     <ul>
       <li>
-        Signin' in shares yer public <strong>@username</strong> and Telegram id, nothing more. The username goes on the
+        Signin' in shares yer public Telegram profile with the site. We keep yer <strong>@username</strong> and Telegram id. The username goes on the
         certificate and, once ye've solved it, onto the public Hall of Fame. There's one session cookie and no tracking.
       </li>
       <li>Every code is signed for one player. Sharin' it with others gets them nowhere.</li>

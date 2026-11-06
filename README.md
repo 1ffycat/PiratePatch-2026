@@ -8,7 +8,7 @@ It started as the hands-on part of a webinar on binary patching and is kept here
 game to newcomers, without giving anything away, and keeps optional hints behind a button.
 
 - **Backend:** ASP.NET Core (.NET 10) minimal API, PostgreSQL, PDFsharp
-- **Frontend:** Svelte 5 + TypeScript + Vite, a static site with no third-party requests except Telegram's login widget
+- **Frontend:** Svelte 5 + TypeScript + Vite, a static site with Telegram OpenID Connect sign-in
 - **Challenge:** one C file, compiled once at build time
 - **Deployment:** a Nix flake with a NixOS module (nginx, PostgreSQL, systemd sandboxing, rate limits)
 
@@ -20,7 +20,7 @@ game to newcomers, without giving anything away, and keeps optional hints behind
               └─ static frontend         └─ patches a prebuilt template program per player
 ```
 
-1. A player signs in with the **Telegram Login Widget**. The API verifies Telegram's HMAC; only a public `@username`
+1. A player signs in with **Telegram OpenID Connect**. The API verifies the signed ID token; only a public `@username`
    and the Telegram id are kept.
 2. `GET /api/challenge/binary` returns **their** copy of the challenge program. Nothing is compiled: the API copies
    the template built from [challenge/challenge.c](challenge/challenge.c) and overwrites a fixed-size block of slots in it
@@ -56,6 +56,8 @@ Add the flake and the module:
             telegram = {
               botUsername = "ahoy_ctf_bot";
               botTokenFile = "/run/secrets/piratepatch-bot-token"; # sops-nix, agenix, ...
+              clientId = "123456789"; # BotFather Login Widget client ID
+              clientSecretFile = "/run/secrets/piratepatch-telegram-client-secret";
               adminChatId = 123456789; # optional: new players and solves are sent here
               # or keep it out of the configuration: adminChatIdFile = "/run/secrets/piratepatch-admin-chat";
             };
@@ -70,8 +72,7 @@ Add the flake and the module:
 That alone gives you: a database in your PostgreSQL (see below), the API behind a Unix socket, an nginx virtual host with
 the security headers, and an auto-generated signing key.
 
-Before the first start, create the bot with [@BotFather](https://t.me/BotFather) and run `/setdomain` for it with your domain;
-the login widget refuses to work otherwise.
+Before starting, open the bot in the [@BotFather](https://t.me/BotFather) mini app, select **Login Widget**, and register `https://ahoy.example.org/api/auth/telegram/callback` as an allowed URL (substitute your public origin). Set `clientId` and `clientSecretFile` to the credentials shown there. Keep the signing algorithm at the default RS256. The client secret is distinct from the bot token. Existing players retain their accounts because Telegram user IDs remain the same.
 
 ### Your existing PostgreSQL and nginx
 
@@ -122,8 +123,7 @@ The service is built so that a flood or a bug stays contained:
   ever copied into fixed-size slots.
 - Rate limits at three layers: nginx (`limit_req`, `limit_conn`), a global concurrency cap and per-address budgets in the
   API, and per-player budgets on the downloading and submitting endpoints.
-- The API runs unprivileged with no capabilities, a read-only file system, a syscall filter, no network access unless
-  admin notifications or a remote database need it, and `MemoryMax`/`CPUQuota`/`TasksMax` limits.
+- The API runs unprivileged with no capabilities, a read-only file system, a syscall filter, outbound network access for Telegram authentication and optional notifications or a remote database, and `MemoryMax`/`CPUQuota`/`TasksMax` limits.
 - Kestrel listens on a Unix socket, so there is no port to hit directly.
 - CSRF: state-changing requests must carry the site's own `Origin`; the site is single-origin so there is no CORS.
 - Cookies are `HttpOnly`, `Secure`, `SameSite=Lax` and `__Host-` prefixed.
@@ -179,7 +179,7 @@ With Nix, `nix develop` provides .NET, Node, gcc, PostgreSQL and radare2 in one 
 `dotnet run` uses the `dev` launch profile, which sets the Development environment. There,
 `appsettings.Development.json` supplies throwaway placeholders (a fake bot token and an all-zero signing key) and enables
 `POST /api/auth/dev`, which logs in as any handle without Telegram, so the whole flow works offline. Neither exists in
-production. To try the real login widget you need a bot, an HTTPS domain set in @BotFather, and a tunnel; the dev login is
+production. To try real login you need a bot, the registered HTTPS callback in @BotFather, and a tunnel; the dev login is
 usually enough.
 
 To run the downloaded program on a machine without Linux, use WSL or a VM; it needs glibc 2.34 or newer.
@@ -191,7 +191,7 @@ nix flake check                               # packages, formatting, and the Ni
 nix fmt                                       # format the Nix files
 ```
 
-The VM test boots PostgreSQL, the API and nginx, logs in with a correctly signed Telegram payload, extracts the treasure
+The VM test boots PostgreSQL, the API and nginx, checks the OIDC redirect and uses a development login, extracts the treasure
 code from the downloaded program, claims the certificate, and checks rate limiting and sandboxing.
 
 After changing NuGet packages: `nix build .#api.passthru.fetch-deps && ./result nix/api-deps.json`. After changing npm

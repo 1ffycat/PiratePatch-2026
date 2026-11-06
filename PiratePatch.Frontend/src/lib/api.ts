@@ -83,7 +83,6 @@ const post = <T>(path: string, body?: unknown) =>
 export const api = {
   config: () => request<SiteConfig>('/config'),
   me: () => request<Me>('/me'),
-  loginWithTelegram: (payload: Record<string, unknown>) => post<Me>('/auth/telegram', payload),
   loginForDevelopment: (handle: string) => post<Me>('/auth/dev', { handle }),
   logout: () => post<void>('/auth/logout'),
   submit: (code: string) => post<{ success: boolean; solve: Solve | null }>('/challenge/submit', { code }),

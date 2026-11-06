@@ -43,11 +43,7 @@ services.AddSingleton<PasswordDeriver>();
 services.AddSingleton(sp => ChallengeTemplate.Load(sp.GetRequiredService<IOptions<AssetOptions>>().Value.ChallengeTemplate));
 services.AddSingleton<ChallengeBuilder>();
 services.AddSingleton<CertificateRenderer>();
-services.AddSingleton(sp =>
-{
-    var telegram = sp.GetRequiredService<IOptions<TelegramOptions>>().Value;
-    return new TelegramLoginVerifier(telegram.BotToken, TimeSpan.FromSeconds(telegram.LoginMaxAgeSeconds), TimeProvider.System);
-});
+services.AddHttpClient<TelegramOidc>(client => client.Timeout = TimeSpan.FromSeconds(10));
 
 services.AddSingleton(sp => new NpgsqlDataSourceBuilder(sp.GetRequiredService<IOptions<DatabaseOptions>>().Value.ToConnectionString()).Build());
 services.AddSingleton<PlayerStore>();

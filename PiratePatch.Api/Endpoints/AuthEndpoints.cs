@@ -15,55 +15,30 @@ namespace PiratePatch.Api.Endpoints;
 
 public static class AuthEndpoints
 {
-    private const int MaxLoginFields = 16;
-    private const int MaxLoginFieldLength = 1024;
-
     public static void MapAuthEndpoints(this RouteGroupBuilder api, bool devLogin)
     {
         var auth = api.MapGroup("/auth");
-        auth.MapPost("/telegram", LoginWithTelegram).RequireRateLimiting(RateLimits.Login);
+        auth.MapGet("/telegram", StartTelegram).RequireRateLimiting(RateLimits.Login);
+        auth.MapGet("/telegram/callback", FinishTelegram).RequireRateLimiting(RateLimits.Login);
         auth.MapPost("/logout", (Delegate)Logout);
-
         if (devLogin)
             auth.MapPost("/dev", LoginForDevelopment).RequireRateLimiting(RateLimits.Login);
-
         api.MapGet("/me", GetMe);
     }
 
-    private static async Task<Results<Ok<MeResponse>, ProblemHttpResult>> LoginWithTelegram(
-        JsonElement body,
-        HttpContext http,
-        TelegramLoginVerifier verifier,
-        PlayerStore players,
-        IAdminNotifier notifier,
-        ILogger<TelegramLoginVerifier> logger,
-        CancellationToken ct)
+    private static IResult StartTelegram(HttpContext http, TelegramOidc oidc) => oidc.Start(http);
+
+    private static async Task<IResult> FinishTelegram(
+        HttpContext http, TelegramOidc oidc, PlayerStore players, IAdminNotifier notifier, CancellationToken ct)
     {
-        if (!TryReadFields(body, out var fields))
-            return TypedResults.Problem("That login did not make sense.", statusCode: StatusCodes.Status400BadRequest);
+        var (player, failure) = await oidc.FinishAsync(http, ct);
+        if (player is null)
+            return Results.Redirect("/challenge?login=" + (failure == TelegramLoginFailure.NoUsername ? "username" : "failed"));
 
-        var (user, failure) = verifier.Verify(fields);
-        switch (failure)
-        {
-            case TelegramLoginFailure.None:
-                break;
-            case TelegramLoginFailure.NoUsername:
-                return TypedResults.Problem(
-                    "Ye need a public @username on Telegram (Settings > Username) so the certificate can name ye.",
-                    statusCode: StatusCodes.Status422UnprocessableEntity);
-            case TelegramLoginFailure.Expired:
-                return TypedResults.Problem("That login has gone stale. Try again.", statusCode: StatusCodes.Status401Unauthorized);
-            default:
-                logger.LogWarning("Rejected a Telegram login: {Failure}", failure);
-                return TypedResults.Problem("Telegram would not vouch for ye.", statusCode: StatusCodes.Status401Unauthorized);
-        }
-
-        var player = user!.Value;
-        if (await players.RecordLoginAsync(player.Id, player.Username, ct))
-            notifier.Notify($"New player: @{player.Username}");
-
-        await PlayerSession.SignInAsync(http, player);
-        return TypedResults.Ok(await BuildMe(new PlayerIdentity(player.Id, player.Username), players, ct));
+        if (await players.RecordLoginAsync(player.Value.Id, player.Value.Username, ct))
+            notifier.Notify($"New player: @{player.Value.Username}");
+        await PlayerSession.SignInAsync(http, player.Value);
+        return Results.Redirect("/challenge");
     }
 
     private static async Task<Ok<MeResponse>> LoginForDevelopment(
@@ -95,30 +70,7 @@ public static class AuthEndpoints
         return new MeResponse(new PlayerResponse(player.Handle), solve?.ToResponse());
     }
 
-    /// <summary>Flattens the widget's JSON object into the string pairs Telegram signed.</summary>
-    private static bool TryReadFields(JsonElement body, out Dictionary<string, string> fields)
-    {
-        fields = [];
-        if (body.ValueKind != JsonValueKind.Object)
-            return false;
 
-        foreach (var property in body.EnumerateObject())
-        {
-            var value = property.Value.ValueKind switch
-            {
-                JsonValueKind.String => property.Value.GetString(),
-                JsonValueKind.Number => property.Value.GetRawText(),
-                _ => null,
-            };
-
-            if (value is null || value.Length > MaxLoginFieldLength || fields.Count >= MaxLoginFields)
-                return false;
-
-            fields[property.Name] = value;
-        }
-
-        return true;
-    }
 }
 
 public static class SolveMapping

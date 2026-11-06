@@ -5,11 +5,10 @@
   import { link } from '../lib/router.svelte'
   import Hints from '../lib/Hints.svelte'
   import Notice from '../lib/Notice.svelte'
-  import TelegramLogin from '../lib/TelegramLogin.svelte'
 
   let code = $state('')
   let busy = $state(false)
-  let error = $state<string | null>(null)
+  let error = $state<string | null>(new URLSearchParams(window.location.search).get('login') === 'username' ? 'Ye need a public @username on Telegram (Settings ? Username).' : new URLSearchParams(window.location.search).has('login') ? 'Telegram could not sign ye in. Try again.' : null)
   let devHandle = $state('')
 
   const player = $derived(session.me.player)
@@ -55,12 +54,12 @@
     <section class="card stack" in:fade>
       <h2>Show us yer colours</h2>
       <p>
-        Sign in with Telegram to get yer personal program. Only yer public <strong>@username</strong> is shared; it goes
+        Sign in with Telegram to get yer personal program. Telegram shares yer public profile; we keep yer ID and <strong>@username</strong>, which goes
         on yer certificate and, once ye've solved the challenge, the public Hall of Fame.
       </p>
       <p class="small muted">An account needs a public username (Telegram: Settings → Username) so the certificate can name ye.</p>
 
-      <TelegramLogin botUsername={session.config.botUsername} onauth={(user) => login(() => api.loginWithTelegram(user))} />
+      <div><a class="button" href="/api/auth/telegram">Sign in with Telegram</a></div>
 
       {#if session.config.devLogin}
         <form class="stack dev" onsubmit={(e) => { e.preventDefault(); login(() => api.loginForDevelopment(devHandle)) }}>

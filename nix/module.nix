@@ -26,9 +26,8 @@ let
 
   localDatabase = cfg.database.createLocally;
 
-  # Nothing the API does needs the network unless it talks to a remote database or sends admin messages.
-  notifies = cfg.telegram.adminChatId != null || cfg.telegram.adminChatIdFile != null;
-  needsNetwork = notifies || !(lib.hasPrefix "/" cfg.database.host);
+  # OIDC token exchange and signing-key discovery require outbound HTTPS.
+  needsNetwork = true;
 
   vhost = config.services.nginx.virtualHosts.${cfg.domain};
 
@@ -77,6 +76,7 @@ in
       default = "https://${cfg.domain}";
       defaultText = lib.literalExpression ''"https://''${config.services.piratepatch.domain}"'';
       description = ''
+
         The origin visitors use, without a trailing slash. State-changing requests must come from exactly this
         origin, and it is printed on certificates. Change it if TLS is terminated elsewhere or the site is served
         on a port other than 443. The session cookie only works over HTTPS (plain HTTP is for local testing).
@@ -94,17 +94,29 @@ in
         type = types.str;
         example = "ahoy_ctf_bot";
         description = ''
-          Username of the Telegram bot behind the login widget, without the `@`.
-          Create the bot with @BotFather and set its domain there with `/setdomain`.
+
+          Username of the Telegram bot, without the `@`.
         '';
+      };
+
+      clientId = mkOption {
+        type = types.strMatching "[0-9]+";
+        example = "123456789";
+        description = "Telegram Login client ID from BotFather.";
+      };
+
+      clientSecretFile = mkOption {
+        type = secretFileType;
+        example = "/run/secrets/piratepatch-telegram-client-secret";
+        description = "File containing the Telegram Login client secret from BotFather.";
       };
 
       botTokenFile = mkOption {
         type = secretFileType;
         example = "/run/secrets/piratepatch-bot-token";
         description = ''
-          File containing the bot's token. It verifies Telegram logins and, if an admin chat is set,
-          sends notifications. Passed to the service as a systemd credential, so it can be root-only.
+
+          File containing the bot's token. If an admin chat is set, it sends notifications. Passed to the service as a systemd credential, so it can be root-only.
         '';
       };
 
@@ -112,6 +124,7 @@ in
         type = types.nullOr types.int;
         default = null;
         description = ''
+
           Chat to notify about new players and solves. No notifications when this and `adminChatIdFile` are null.
           A chat id is not a secret, but it is private enough to keep out of a public configuration: see `adminChatIdFile`.
         '';
@@ -122,6 +135,7 @@ in
         default = null;
         example = "/run/secrets/piratepatch-admin-chat";
         description = ''
+
           File containing the id of the chat to notify (for example from agenix or sops-nix), as an alternative to
           `adminChatId`. Passed to the service as a systemd credential, so it can be root-only.
         '';
@@ -133,6 +147,7 @@ in
       default = null;
       example = "/run/secrets/piratepatch-signing-key";
       description = ''
+
         File containing the base64 of a 32-byte Ed25519 seed (`openssl rand -base64 32`). Every treasure
         code is signed with it, and the per-player passwords derive from it.
 
@@ -185,6 +200,7 @@ in
         type = types.bool;
         default = true;
         description = ''
+
           Add a virtual host for `domain` to `services.nginx`. It is an ordinary virtual host with defaults
           (ACME certificate, HTTPS redirect) you can override like any other. The module requests a certificate
           for `domain` itself unless the virtual host already sets `useACMEHost`, for example for a wildcard certificate:
@@ -261,6 +277,7 @@ in
         unitConfig.ConditionPathExists = "!${generatedKey}";
         path = [ pkgs.openssl ];
         script = ''
+
           umask 0077
           openssl rand -base64 32 > "$STATE_DIRECTORY/signing.key"
         '';
@@ -296,6 +313,7 @@ in
           Site__SessionHours = toString cfg.sessionHours;
           Site__KeysPath = "${stateDir}/keys";
           Telegram__BotUsername = cfg.telegram.botUsername;
+          Telegram__ClientId = cfg.telegram.clientId;
           Database__Host = cfg.database.host;
           Database__Port = toString cfg.database.port;
           Database__Name = cfg.database.name;
@@ -326,6 +344,7 @@ in
 
           LoadCredential = [
             "Telegram__BotToken:${cfg.telegram.botTokenFile}"
+            "Telegram__ClientSecret:${cfg.telegram.clientSecretFile}"
             "Signing__PrivateKey:${
               if cfg.signing.privateKeyFile != null then cfg.signing.privateKeyFile else generatedKey
             }"
@@ -391,6 +410,7 @@ in
         enable = true;
 
         appendHttpConfig = ''
+
           limit_req_zone $binary_remote_addr zone=piratepatch_api:10m rate=${toString cfg.nginx.requestsPerSecond}r/s;
           limit_conn_zone $binary_remote_addr zone=piratepatch_conn:10m;
         '';
@@ -404,6 +424,7 @@ in
 
           # add_header is not inherited into locations that use it themselves, so none of the locations below do.
           extraConfig = ''
+
             client_max_body_size 16k;
             client_body_timeout 10s;
             client_header_timeout 10s;
@@ -412,6 +433,7 @@ in
             gzip_static on;
 
             ${lib.optionalString vhost.forceSSL ''
+
               add_header Strict-Transport-Security "max-age=31536000" always;
             ''}
             add_header X-Content-Type-Options "nosniff" always;
@@ -419,8 +441,8 @@ in
             add_header Referrer-Policy "no-referrer" always;
             add_header Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=()" always;
             add_header Cross-Origin-Opener-Policy "same-origin" always;
-            # Telegram's login widget is the only third party: its script, and its popup frame.
-            add_header Content-Security-Policy "default-src 'none'; script-src 'self' https://telegram.org; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data:; connect-src 'self'; frame-src https://oauth.telegram.org; form-action 'self'; base-uri 'none'; frame-ancestors 'none'" always;
+            # Login uses a top-level redirect; no third-party scripts are needed.
+            add_header Content-Security-Policy "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data:; connect-src 'self'; frame-src 'none'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'" always;
           '';
 
           locations."/" = {
@@ -440,6 +462,7 @@ in
             proxyPass = "http://unix:${socket}";
             recommendedProxySettings = false;
             extraConfig = ''
+
               limit_req zone=piratepatch_api burst=${toString cfg.nginx.burst} nodelay;
               limit_req_status 429;
 
