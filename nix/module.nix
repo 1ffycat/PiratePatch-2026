@@ -89,6 +89,17 @@ in
       description = "How long a login stays valid.";
     };
 
+    httpsProxy = mkOption {
+      type = types.nullOr types.str;
+      default = null;
+      example = "http://127.0.0.1:2080";
+      description = ''
+        Optional proxy for HTTPS requests made by the API, including Telegram authentication and notifications.
+        Sets HTTPS_PROXY for the systemd service. The proxy URL is visible in the Nix store and service environment,
+        so do not include credentials in it. The proxy must be reachable from the service.
+      '';
+    };
+
     telegram = {
       botUsername = mkOption {
         type = types.str;
@@ -323,6 +334,9 @@ in
           DOTNET_EnableDiagnostics = "0";
           DOTNET_gcServer = "0";
           DOTNET_CLI_TELEMETRY_OPTOUT = "1";
+        }
+        // lib.optionalAttrs (cfg.httpsProxy != null) {
+          HTTPS_PROXY = cfg.httpsProxy;
         }
         // lib.optionalAttrs (cfg.telegram.adminChatId != null) {
           Telegram__AdminChatId = toString cfg.telegram.adminChatId;

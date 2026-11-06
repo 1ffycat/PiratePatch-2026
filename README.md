@@ -53,6 +53,8 @@ Add the flake and the module:
           services.piratepatch = {
             enable = true;
             domain = "ahoy.example.org";
+            # Optional: proxy outbound HTTPS requests (Telegram login and notifications).
+            # httpsProxy = "http://127.0.0.1:2080";
             telegram = {
               botUsername = "ahoy_ctf_bot";
               botTokenFile = "/run/secrets/piratepatch-bot-token"; # sops-nix, agenix, ...
@@ -73,6 +75,14 @@ That alone gives you: a database in your PostgreSQL (see below), the API behind 
 the security headers, and an auto-generated signing key.
 
 Before starting, open the bot in the [@BotFather](https://t.me/BotFather) mini app, select **Login Widget**, and register `https://ahoy.example.org/api/auth/telegram/callback` as an allowed URL (substitute your public origin). Set `clientId` and `clientSecretFile` to the credentials shown there. Keep the signing algorithm at the default RS256. The client secret is distinct from the bot token. Existing players retain their accounts because Telegram user IDs remain the same.
+
+To route the API's outbound HTTPS requests through a proxy, set `services.piratepatch.httpsProxy`, for example
+`"http://127.0.0.1:2080"`. This sets `HTTPS_PROXY` on the systemd service and applies to Telegram's token exchange,
+signing-key download, and bot notifications. The proxy must accept HTTP CONNECT and be reachable on the NixOS host;
+the setting does not install or start one. It does not proxy the visitor's browser redirect to Telegram. The URL is
+visible in the Nix store and service environment, so do not embed credentials. Without the NixOS module, set
+`HTTPS_PROXY` in the API process environment instead; `HTTP_PROXY` alone applies to HTTP requests, not Telegram's HTTPS
+requests.
 
 ### Your existing PostgreSQL and nginx
 
@@ -106,6 +116,7 @@ The module adds to what you already run; it does not replace it.
 | `nginx.enable` | Turn the virtual host off and bring your own proxy. |
 | `nginx.requestsPerSecond` / `burst` / `maxConnections` | Per-client-address limits at the edge. |
 | `sessionHours` | Login lifetime. |
+| `httpsProxy` | Optional proxy for outbound HTTPS requests from the API. |
 
 Everything is documented in [nix/module.nix](nix/module.nix).
 

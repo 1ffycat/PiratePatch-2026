@@ -13,6 +13,7 @@ pkgs.testers.runNixOSTest {
       services.piratepatch = {
         enable = true;
         domain = "ahoy.test";
+        httpsProxy = "http://127.0.0.1:2080";
         telegram = {
           botUsername = "piratepatch_test_bot";
           botTokenFile = "/etc/piratepatch-test-token";
@@ -26,6 +27,22 @@ pkgs.testers.runNixOSTest {
       systemd.services.piratepatch.environment.ASPNETCORE_ENVIRONMENT = lib.mkForce "Development";
       systemd.services.piratepatch.environment.Site__DevLogin = "true";
       environment.etc."piratepatch-test-secret".text = "test-secret";
+
+      # Record CONNECT requests without requiring external Telegram access.
+      systemd.services.piratepatch-test-proxy = {
+        wantedBy = [ "multi-user.target" ];
+        serviceConfig.ExecStart = "${pkgs.python3}/bin/python3 -u ${pkgs.writeText "piratepatch-test-proxy.py" ''
+          from http.server import BaseHTTPRequestHandler, HTTPServer
+
+          class Proxy(BaseHTTPRequestHandler):
+              def do_CONNECT(self):
+                  with open("/tmp/piratepatch-proxy-connect", "w") as output:
+                      output.write(self.path)
+                  self.send_error(502)
+
+          HTTPServer(("127.0.0.1", 2080), Proxy).serve_forever()
+        ''}";
+      };
 
       # Plain HTTP, no certificate: the standard nginx options override the module's defaults.
       services.nginx.virtualHosts."ahoy.test" = {
@@ -56,7 +73,7 @@ pkgs.testers.runNixOSTest {
 
   testScript = ''
 
-    import base64, json, shlex
+    import base64, json, shlex, urllib.parse
 
     BASE = "http://127.0.0.1"
     HOST = "-H 'Host: ahoy.test'"
@@ -127,6 +144,14 @@ pkgs.testers.runNixOSTest {
         assert status_of(f"{HOST} '{BASE}/api/auth/telegram/callback?code=forged&state=forged'") == "302"
         me = json.loads(server.succeed(f"curl -s {HOST} {BASE}/api/me"))
         assert me["player"] is None, me
+
+    with subtest("Telegram token exchange uses the configured HTTPS proxy"):
+        server.wait_for_unit("piratepatch-test-proxy.service")
+        headers = server.succeed(f"curl -si -c /tmp/oidc-cookies {HOST} {BASE}/api/auth/telegram")
+        location = next(line.split(": ", 1)[1].strip() for line in headers.splitlines() if line.lower().startswith("location:"))
+        state = urllib.parse.parse_qs(urllib.parse.urlparse(location).query)["state"][0]
+        assert status_of(f"{HOST} -b /tmp/oidc-cookies '{BASE}/api/auth/telegram/callback?code=test&state={state}'") == "302"
+        assert server.succeed("cat /tmp/piratepatch-proxy-connect").strip() == "oauth.telegram.org:443"
 
     with subtest("a development login starts a session"):
         assert post("/api/auth/dev", {"handle": "blackbeard"}, "-D /tmp/h1").strip() == "200"
