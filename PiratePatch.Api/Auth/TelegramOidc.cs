@@ -48,17 +48,25 @@ public sealed partial class TelegramOidc(HttpClient client, IDataProtectionProvi
         http.Response.Headers.CacheControl = "no-store";
         var cookie = http.Request.Cookies[Cookie];
         http.Response.Cookies.Delete(Cookie, new CookieOptions { Path = "/api/auth/telegram/callback", Secure = http.Request.IsHttps, SameSite = SameSiteMode.Lax });
+        var stage = "checking callback";
         try
         {
             if (cookie is null || cookie.Length > 4096 || http.Request.Query["state"].Count != 1 || http.Request.Query["code"].Count != 1)
+            {
+                logger.LogWarning("Telegram login rejected: missing or invalid correlation cookie, state, or code");
                 return (null, TelegramLoginFailure.Malformed);
+            }
             var correlation = JsonSerializer.Deserialize<Correlation>(Protector.Unprotect(cookie));
             var state = http.Request.Query["state"].ToString();
             var code = http.Request.Query["code"].ToString();
             if (correlation is null || state.Length > 256 || code.Length is 0 or > 2048 ||
                 !CryptographicOperations.FixedTimeEquals(Encoding.UTF8.GetBytes(state), Encoding.UTF8.GetBytes(correlation.State)))
+            {
+                logger.LogWarning("Telegram login rejected: invalid authorization code or state mismatch");
                 return (null, TelegramLoginFailure.Malformed);
+            }
 
+            stage = "exchanging authorization code";
             using var request = new HttpRequestMessage(HttpMethod.Post, Issuer + "/token");
             request.Headers.Authorization = new AuthenticationHeaderValue("Basic", Convert.ToBase64String(Encoding.UTF8.GetBytes($"{telegram.Value.ClientId}:{telegram.Value.ClientSecret}")));
             request.Content = new FormUrlEncodedContent(new Dictionary<string, string> {
@@ -69,26 +77,56 @@ public sealed partial class TelegramOidc(HttpClient client, IDataProtectionProvi
             response.EnsureSuccessStatusCode();
             using var tokenResponse = JsonDocument.Parse(await response.Content.ReadAsStringAsync(ct));
             var token = tokenResponse.RootElement.GetProperty("id_token").GetString() ?? "";
+            stage = "fetching signing keys";
             using var keysResponse = await client.GetAsync(Issuer + "/.well-known/jwks.json", ct);
             keysResponse.EnsureSuccessStatusCode();
-            using var keys = JsonDocument.Parse(await keysResponse.Content.ReadAsStringAsync(ct));
-            return VerifyToken(token, keys.RootElement, telegram.Value.ClientId, correlation.Nonce, DateTimeOffset.UtcNow);
+            var keysBody = await keysResponse.Content.ReadAsStringAsync(ct);
+            JsonDocument keys;
+            try
+            {
+                keys = JsonDocument.Parse(keysBody);
+            }
+            catch (JsonException ex)
+            {
+                // Never log response bodies: a proxy or upstream service may return sensitive data.
+                logger.LogWarning("Telegram signing-key response was not JSON: content type {ContentType}, content encoding {ContentEncoding}, body length {BodyLength}, error at line {Line}, byte {Position}",
+                    keysResponse.Content.Headers.ContentType?.MediaType,
+                    string.Join(",", keysResponse.Content.Headers.ContentEncoding), keysBody.Length, ex.LineNumber, ex.BytePositionInLine);
+                throw;
+            }
+            using (keys)
+            {
+                stage = "validating ID token";
+                var result = VerifyToken(token, keys.RootElement, telegram.Value.ClientId, correlation.Nonce, DateTimeOffset.UtcNow, logger);
+                if (result.Failure != TelegramLoginFailure.None)
+                    logger.LogWarning("Telegram login rejected during {Stage}: {Failure}", stage, result.Failure);
+                return result;
+            }
         }
         catch (Exception ex) when (ex is CryptographicException or FormatException or JsonException or HttpRequestException or InvalidOperationException or KeyNotFoundException or ArgumentException or TaskCanceledException)
         {
-            logger.LogWarning("Telegram login failed: {ErrorType}", ex.GetType().Name);
+            logger.LogWarning("Telegram login failed while {Stage}: {ErrorType}; HTTP status: {StatusCode}",
+                stage, ex.GetType().Name, (ex as HttpRequestException)?.StatusCode);
             return (null, TelegramLoginFailure.Malformed);
         }
     }
 
-    internal static (TelegramUser? User, TelegramLoginFailure Failure) VerifyToken(string token, JsonElement keys, string audience, string nonce, DateTimeOffset now)
+    internal static (TelegramUser? User, TelegramLoginFailure Failure) VerifyToken(string token, JsonElement keys, string audience, string nonce, DateTimeOffset now, ILogger? logger = null)
     {
+        var step = "parsing token";
+        (TelegramUser?, TelegramLoginFailure) Invalid(string claim)
+        {
+            logger?.LogWarning("Telegram ID token rejected: invalid or missing {Claim} claim", claim);
+            return (null, TelegramLoginFailure.Malformed);
+        }
+
         try
         {
             var parts = token.Split('.');
             if (token.Length > 16384 || parts.Length != 3) return (null, TelegramLoginFailure.Malformed);
             using var header = JsonDocument.Parse(WebEncoders.Base64UrlDecode(parts[0]));
             using var payload = JsonDocument.Parse(WebEncoders.Base64UrlDecode(parts[1]));
+            step = "checking signature";
             var h = header.RootElement;
             if (h.GetProperty("alg").GetString() != "RS256") return (null, TelegramLoginFailure.BadSignature);
             var kid = h.GetProperty("kid").GetString();
@@ -99,19 +137,29 @@ public sealed partial class TelegramOidc(HttpClient client, IDataProtectionProvi
             rsa.ImportParameters(new RSAParameters { Modulus = WebEncoders.Base64UrlDecode(key.GetProperty("n").GetString()!), Exponent = WebEncoders.Base64UrlDecode(key.GetProperty("e").GetString()!) });
             if (!rsa.VerifyData(Encoding.ASCII.GetBytes(parts[0] + "." + parts[1]), WebEncoders.Base64UrlDecode(parts[2]), HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1))
                 return (null, TelegramLoginFailure.BadSignature);
+            step = "checking claims";
             var p = payload.RootElement;
-            if (p.GetProperty("iss").GetString() != Issuer || p.GetProperty("aud").GetString() != audience ||
-                p.GetProperty("nonce").GetString() != nonce || p.GetProperty("exp").GetInt64() <= now.ToUnixTimeSeconds() ||
-                p.GetProperty("iat").GetInt64() > now.ToUnixTimeSeconds() + 60 ||
-                !p.TryGetProperty("sub", out var sub) || string.IsNullOrEmpty(sub.GetString()) ||
-                !p.TryGetProperty("id", out var idValue) || !idValue.TryGetInt64(out var id) || id <= 0)
-                return (null, TelegramLoginFailure.Malformed);
+            if (!p.TryGetProperty("iss", out var issuer) || issuer.ValueKind != JsonValueKind.String || issuer.GetString() != Issuer)
+                return Invalid("issuer");
+            if (!p.TryGetProperty("aud", out var aud) || aud.ValueKind != JsonValueKind.String || aud.GetString() != audience)
+                return Invalid("audience");
+            if (!p.TryGetProperty("nonce", out var nonceClaim) || nonceClaim.ValueKind != JsonValueKind.String || nonceClaim.GetString() != nonce)
+                return Invalid("nonce");
+            if (!p.TryGetProperty("exp", out var exp) || exp.ValueKind != JsonValueKind.Number || !exp.TryGetInt64(out var expires) || expires <= now.ToUnixTimeSeconds())
+                return Invalid("expiration");
+            if (!p.TryGetProperty("iat", out var iat) || iat.ValueKind != JsonValueKind.Number || !iat.TryGetInt64(out var issued) || issued > now.ToUnixTimeSeconds() + 60)
+                return Invalid("issued-at");
+            if (!p.TryGetProperty("sub", out var sub) || sub.ValueKind != JsonValueKind.String || string.IsNullOrEmpty(sub.GetString()))
+                return Invalid("subject");
+            if (!p.TryGetProperty("id", out var idValue) || idValue.ValueKind != JsonValueKind.Number || !idValue.TryGetInt64(out var id) || id <= 0)
+                return Invalid("Telegram ID");
             if (!p.TryGetProperty("preferred_username", out var usernameValue) || usernameValue.ValueKind != JsonValueKind.String || usernameValue.GetString() is not { } username || !UsernameShape().IsMatch(username))
                 return (null, TelegramLoginFailure.NoUsername);
             return (new TelegramUser(id, username), TelegramLoginFailure.None);
         }
         catch (Exception ex) when (ex is CryptographicException or FormatException or JsonException or InvalidOperationException or KeyNotFoundException or ArgumentException or OverflowException)
         {
+            logger?.LogWarning("Telegram ID token failed while {Step}: {ErrorType}", step, ex.GetType().Name);
             return (null, TelegramLoginFailure.Malformed);
         }
     }
