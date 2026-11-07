@@ -1,4 +1,5 @@
-﻿using System.Net.Http.Headers;
+using System.Globalization;
+using System.Net.Http.Headers;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -53,7 +54,7 @@ public sealed partial class TelegramOidc(HttpClient client, IDataProtectionProvi
         {
             if (cookie is null || cookie.Length > 4096 || http.Request.Query["state"].Count != 1 || http.Request.Query["code"].Count != 1)
             {
-                logger.LogWarning("Telegram login rejected: missing or invalid correlation cookie, state, or code");
+                logger.LogDebug("Telegram login rejected: missing or invalid correlation cookie, state, or code");
                 return (null, TelegramLoginFailure.Malformed);
             }
             var correlation = JsonSerializer.Deserialize<Correlation>(Protector.Unprotect(cookie));
@@ -89,7 +90,7 @@ public sealed partial class TelegramOidc(HttpClient client, IDataProtectionProvi
             catch (JsonException ex)
             {
                 // Never log response bodies: a proxy or upstream service may return sensitive data.
-                logger.LogWarning("Telegram signing-key response was not JSON: content type {ContentType}, content encoding {ContentEncoding}, body length {BodyLength}, error at line {Line}, byte {Position}",
+                logger.LogDebug("Telegram signing-key response was not JSON: content type {ContentType}, content encoding {ContentEncoding}, body length {BodyLength}, error at line {Line}, byte {Position}",
                     keysResponse.Content.Headers.ContentType?.MediaType,
                     string.Join(",", keysResponse.Content.Headers.ContentEncoding), keysBody.Length, ex.LineNumber, ex.BytePositionInLine);
                 throw;
@@ -98,7 +99,9 @@ public sealed partial class TelegramOidc(HttpClient client, IDataProtectionProvi
             {
                 stage = "validating ID token";
                 var result = VerifyToken(token, keys.RootElement, telegram.Value.ClientId, correlation.Nonce, DateTimeOffset.UtcNow, logger);
-                if (result.Failure != TelegramLoginFailure.None)
+                if (result.Failure == TelegramLoginFailure.NoUsername)
+                    logger.LogDebug("Telegram login requires a public username");
+                else if (result.Failure != TelegramLoginFailure.None)
                     logger.LogWarning("Telegram login rejected during {Stage}: {Failure}", stage, result.Failure);
                 return result;
             }
@@ -116,7 +119,7 @@ public sealed partial class TelegramOidc(HttpClient client, IDataProtectionProvi
         var step = "parsing token";
         (TelegramUser?, TelegramLoginFailure) Invalid(string claim)
         {
-            logger?.LogWarning("Telegram ID token rejected: invalid or missing {Claim} claim", claim);
+            logger?.LogDebug("Telegram ID token rejected: invalid or missing {Claim} claim", claim);
             return (null, TelegramLoginFailure.Malformed);
         }
 
@@ -151,15 +154,26 @@ public sealed partial class TelegramOidc(HttpClient client, IDataProtectionProvi
                 return Invalid("issued-at");
             if (!p.TryGetProperty("sub", out var sub) || sub.ValueKind != JsonValueKind.String || string.IsNullOrEmpty(sub.GetString()))
                 return Invalid("subject");
-            if (!p.TryGetProperty("id", out var idValue) || idValue.ValueKind != JsonValueKind.Number || !idValue.TryGetInt64(out var id) || id <= 0)
+            var hasId = p.TryGetProperty("id", out var idValue);
+            long id = 0;
+            var validId = hasId && (idValue.ValueKind switch
+            {
+                JsonValueKind.Number => idValue.TryGetInt64(out id),
+                JsonValueKind.String => long.TryParse(idValue.GetString(), NumberStyles.None, CultureInfo.InvariantCulture, out id),
+                _ => false,
+            }) && id > 0;
+            if (!validId)
+            {
+                logger?.LogDebug("Telegram ID claim has JSON type {ValueKind}", hasId ? idValue.ValueKind.ToString() : "missing");
                 return Invalid("Telegram ID");
+            }
             if (!p.TryGetProperty("preferred_username", out var usernameValue) || usernameValue.ValueKind != JsonValueKind.String || usernameValue.GetString() is not { } username || !UsernameShape().IsMatch(username))
                 return (null, TelegramLoginFailure.NoUsername);
             return (new TelegramUser(id, username), TelegramLoginFailure.None);
         }
         catch (Exception ex) when (ex is CryptographicException or FormatException or JsonException or InvalidOperationException or KeyNotFoundException or ArgumentException or OverflowException)
         {
-            logger?.LogWarning("Telegram ID token failed while {Step}: {ErrorType}", step, ex.GetType().Name);
+            logger?.LogDebug("Telegram ID token failed while {Step}: {ErrorType}", step, ex.GetType().Name);
             return (null, TelegramLoginFailure.Malformed);
         }
     }
